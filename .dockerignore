@@ -1,0 +1,12 @@
+.git
+.github
+README.md
+*.log
+*.tmp
+*.tar
+*.tar.gz
+*.tar.xz
+**/.venv
+**/node_modules
+**/target
+**/__pycache__

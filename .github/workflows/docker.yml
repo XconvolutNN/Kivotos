@@ -1,0 +1,132 @@
+name: Build and publish container
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+  schedule:
+    # Every Monday at 01:10 UTC; refresh floating stable/LTS toolchains.
+    - cron: '10 1 * * 1'
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  container:
+    name: Build, test, and optionally publish (amd64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Normalize GHCR image name
+        id: image
+        shell: bash
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate image tags and OCI labels
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=ref,event=pr
+            type=sha
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+          labels: |
+            org.opencontainers.image.title=Ubuntu Devbox
+            org.opencontainers.image.description=Ubuntu 26.04 developer container with Blender, uv/Python, Go, Rust, Node.js, SSH/SFTP and networking tools
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build for smoke tests
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          pull: true
+          load: true
+          push: false
+          no-cache: ${{ github.event_name == 'schedule' }}
+          tags: ubuntu-devbox:ci
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Verify tools, UTF-8, non-root access, and SSH configuration
+        shell: bash
+        run: |
+          docker run --rm --entrypoint /bin/bash ubuntu-devbox:ci -euo pipefail -c '
+            uv --version
+            python --version
+            python3 --version
+            blender --version
+            go version
+            rustc --version
+            cargo --version
+            node --version
+            npm --version
+            btop --version
+            nvtop --version
+            test -z "$(getcap /usr/bin/nvtop)"
+            test "$(locale charmap 2>&1)" = UTF-8
+            command -v ping traceroute tracert telnet dig nc ip ss gcc g++ make
+
+            useradd -m -s /bin/bash ciuser
+            su - ciuser -c "uv --version && python --version && blender --version && go version && rustc --version && cargo --version && node --version && npm --version && btop --version && nvtop --version"
+            test "$(su - ciuser -c "locale charmap" 2>&1)" = UTF-8
+            su - ciuser -c "test ! -w /opt/rustup && test ! -w /opt/uv/python"
+
+            mkdir -p /run/sshd
+            ssh-keygen -A
+            /usr/sbin/sshd -t
+            /usr/sbin/sshd -T > /tmp/sshd-effective
+            grep -Fxq "permitrootlogin no" /tmp/sshd-effective
+            grep -Fxq "passwordauthentication yes" /tmp/sshd-effective
+            grep -Fxq "gatewayports clientspecified" /tmp/sshd-effective
+            grep -Fxq "allowtcpforwarding yes" /tmp/sshd-effective
+            grep -Fxq "allowstreamlocalforwarding yes" /tmp/sshd-effective
+            grep -Fxq "permitopen any" /tmp/sshd-effective
+            grep -Fxq "permitlisten any" /tmp/sshd-effective
+            grep -Fxq "subsystem sftp internal-sftp" /tmp/sshd-effective
+          '
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Re-tag/push the exact locally tested image; do not rebuild after tests.
+      - name: Publish tested image to GHCR
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+        shell: bash
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r tag; do
+            [[ -n "$tag" ]] || continue
+            docker tag ubuntu-devbox:ci "$tag"
+            docker push "$tag"
+          done <<< "$IMAGE_TAGS"

@@ -1,0 +1,15 @@
+services:
+  kivotos:
+    image: ${KIVOTOS_IMAGE:-ghcr.io/xconvolutnn/kivotos:latest}
+    platform: linux/amd64
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${SSH_BIND_IP:-127.0.0.1}:${SSH_PORT:-2222}:22"
+    volumes:
+      - homes:/home
+    # NVIDIA GPU: uncomment after configuring NVIDIA Container Toolkit on the host.
+    # gpus: all
+
+volumes:
+  homes:
