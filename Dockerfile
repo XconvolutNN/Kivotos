@@ -153,9 +153,10 @@ RUN set -euxo pipefail; \
     node --version; \
     npm --version
 
-# SSH/SFTP configuration embedded directly into Dockerfile.
+# SSH overrides; keep the distribution's main config and SFTP subsystem.
 # TCP local/remote/dynamic forwarding; remote bind address client-selected.
 RUN set -eux; \
+    mkdir -p /etc/ssh/sshd_config.d; \
     printf '%s\n' \
         'Port 22' \
         'SyslogFacility AUTHPRIV' \
@@ -163,23 +164,23 @@ RUN set -eux; \
         'PermitRootLogin no' \
         'PubkeyAuthentication yes' \
         'AuthorizedKeysFile .ssh/authorized_keys' \
-        'PasswordAuthentication yes' \
+        'PasswordAuthentication no' \
         'PermitEmptyPasswords no' \
         'KbdInteractiveAuthentication no' \
         'UsePAM yes' \
-        'Subsystem sftp internal-sftp' \
         'DisableForwarding no' \
         'AllowTcpForwarding yes' \
         'AllowStreamLocalForwarding yes' \
         'GatewayPorts clientspecified' \
         'PermitOpen any' \
         'PermitListen any' \
+        'X11Forwarding no' \
         'PermitTTY yes' \
         'PrintMotd no' \
         'AcceptEnv LANG LC_*' \
-        > /etc/ssh/sshd_config; \
-    chmod 600 /etc/ssh/sshd_config; \
-    chown root:root /etc/ssh/sshd_config; \
+        > /etc/ssh/sshd_config.d/00-kivotos.conf; \
+    chmod 600 /etc/ssh/sshd_config.d/00-kivotos.conf; \
+    chown root:root /etc/ssh/sshd_config.d/00-kivotos.conf; \
     mkdir -p /run/sshd; \
     ssh-keygen -A; \
     /usr/sbin/sshd -t; \

@@ -29,8 +29,9 @@ jobs:
     timeout-minutes: 120
 
     steps:
+      # Stable action releases checked on 2026-11-04; pin full revisions.
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -41,7 +42,7 @@ jobs:
 
       - name: Generate image tags and OCI labels
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ steps.image.outputs.name }}
           tags: |
@@ -56,10 +57,18 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build for smoke tests
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: ./Dockerfile
@@ -68,6 +77,9 @@ jobs:
           load: true
           push: false
           no-cache: ${{ github.event_name == 'schedule' }}
+          cache-from: type=registry,ref=${{ steps.image.outputs.name }}:buildcache-amd64
+          # Only trusted main-branch builds update the shared cache.
+          cache-to: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && format('type=registry,ref={0}:buildcache-amd64,mode=max', steps.image.outputs.name) || '' }}
           tags: ubuntu-devbox:ci
           labels: ${{ steps.meta.outputs.labels }}
 
@@ -97,25 +109,22 @@ jobs:
 
             mkdir -p /run/sshd
             ssh-keygen -A
+            cmp /etc/ssh/sshd_config /usr/share/openssh/sshd_config
             /usr/sbin/sshd -t
             /usr/sbin/sshd -T > /tmp/sshd-effective
             grep -Fxq "permitrootlogin no" /tmp/sshd-effective
-            grep -Fxq "passwordauthentication yes" /tmp/sshd-effective
+            grep -Fxq "pubkeyauthentication yes" /tmp/sshd-effective
+            grep -Fxq "passwordauthentication no" /tmp/sshd-effective
+            grep -Fxq "kbdinteractiveauthentication no" /tmp/sshd-effective
+            grep -Fxq "x11forwarding no" /tmp/sshd-effective
             grep -Fxq "gatewayports clientspecified" /tmp/sshd-effective
             grep -Fxq "allowtcpforwarding yes" /tmp/sshd-effective
             grep -Fxq "allowstreamlocalforwarding yes" /tmp/sshd-effective
             grep -Fxq "permitopen any" /tmp/sshd-effective
             grep -Fxq "permitlisten any" /tmp/sshd-effective
-            grep -Fxq "subsystem sftp internal-sftp" /tmp/sshd-effective
+            grep -Fxq "subsystem sftp /usr/lib/openssh/sftp-server" /tmp/sshd-effective
+            test -x /usr/lib/openssh/sftp-server
           '
-
-      - name: Log in to GitHub Container Registry
-        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
 
       # Re-tag/push the exact locally tested image; do not rebuild after tests.
       - name: Publish tested image to GHCR

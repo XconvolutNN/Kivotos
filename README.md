@@ -36,11 +36,18 @@ SSH_PORT=2222
 
 ### 创建 SSH 用户
 
-镜像禁止 root 通过 SSH 登录，首次启动后创建普通用户并设置密码：
+镜像禁止 root 通过 SSH 登录，同时禁用密码和键盘交互认证，使用 SSH 公钥登录。自定义配置位于 `/etc/ssh/sshd_config.d/00-kivotos.conf`，发行版的 `/etc/ssh/sshd_config` 保持原样，SFTP 沿用发行版默认配置。
+
+首次启动后创建普通用户，并安装本机的 SSH 公钥。下面以已有的 `~/.ssh/id_ed25519.pub` 为例，可替换为自己的公钥路径：
 
 ```bash
 docker compose exec kivotos useradd -m -s /bin/bash developer
-docker compose exec kivotos passwd developer
+docker compose cp ~/.ssh/id_ed25519.pub kivotos:/tmp/developer.pub
+docker compose exec kivotos bash -euc '
+  install -d -m 700 -o developer -g developer /home/developer/.ssh
+  install -m 600 -o developer -g developer /tmp/developer.pub /home/developer/.ssh/authorized_keys
+  rm -f /tmp/developer.pub
+'
 ```
 
 连接容器；从其他机器连接时，将 `127.0.0.1` 换成宿主机地址：
@@ -50,11 +57,9 @@ ssh -p 2222 developer@127.0.0.1
 sftp -P 2222 developer@127.0.0.1
 ```
 
-支持密码和公钥认证。使用公钥时，将公钥写入 `/home/developer/.ssh/authorized_keys`，并将 `.ssh` 目录、密钥文件的权限分别设为 `700`、`600`，所有者设为 `developer`。
-
 ### 数据与日常管理
 
-Compose 使用命名卷保存 `/home`。**用户账号和密码不在该卷内**；更新镜像或重建容器后，需用原 UID / GID 重新创建用户并设置密码。SSH 主机密钥也会在重建容器后重新生成，示例未持久化这些密钥。
+Compose 使用命名卷保存 `/home`，包括用户的 `authorized_keys`。**用户账号和组信息不在该卷内**；更新镜像或重建容器后，需用原 UID / GID 重新创建用户。SSH 主机密钥也会在重建容器后重新生成，示例未持久化这些密钥。
 
 ```bash
 docker compose logs -f
@@ -106,9 +111,33 @@ KIVOTOS_IMAGE=kivotos:local docker compose up -d --pull never
 
 ## 自动构建
 
+于 **2026-11-04** 核对以下官方稳定发布，工作流使用对应的完整提交 SHA 固定 Action：
+
+| Action | 已核对版本 | 用途 |
+| --- | --- | --- |
+| [actions/checkout](https://github.com/actions/checkout/releases/tag/v7.0.1) | `v7.0.1` | 检出源码 |
+| [docker/setup-buildx-action](https://github.com/docker/setup-buildx-action/releases/tag/v4.4.1) | `v4.4.1` | 设置 Buildx / BuildKit |
+| [docker/build-push-action](https://github.com/docker/build-push-action/releases/tag/v7.4.0) | `v7.4.0` | 构建并加载待检查的镜像 |
+| [docker/metadata-action](https://github.com/docker/metadata-action/releases/tag/v6.2.0) | `v6.2.0` | 生成镜像标签与 OCI 元数据 |
+| [docker/login-action](https://github.com/docker/login-action/releases/tag/v4.7.0) | `v4.7.0` | 登录 GHCR |
+
+这些版本使用 Node.js 24 Action 运行时。继续使用 `ubuntu-24.04` 托管 runner，保留 `persist-credentials: false`，仅在允许发布的分支和事件中使用 GHCR 写权限。后续更新 Action 时，应重新核对官方发布与提交 SHA。
+
 [GitHub Actions](.github/workflows/docker.yml) 在推送、PR、手动触发和每周一 `01:10 UTC` 时构建并检查镜像，包括普通用户工具访问、UTF-8 locale、nvtop capabilities 和 SSH 配置。只有检查成功后，`main` 分支及 `v*` 标签构建才会发布到 GHCR；`main` 发布 `latest`，版本标签发布同名镜像标签。
 
 uv、Python、Go、Rust 和 Node.js 按 Dockerfile 的策略在构建时选择稳定版或 LTS；Ubuntu 与 Blender 使用 Dockerfile 指定的版本。定时构建禁用层缓存以更新工具链。同一源码在不同时间重新构建，工具版本可能不同。
+
+### 构建缓存
+
+采用 Docker 官方支持的 [Registry cache](https://docs.docker.com/build/cache/backends/registry/)，缓存位置为 `ghcr.io/xconvolutnn/kivotos:buildcache-amd64`。该标签保存 BuildKit 缓存，与 `latest`、`main` 和提交标签分开，不用于部署。
+
+- 构建通过 `cache-from` 读取缓存，`main` 分支通过 `cache-to` 和 `mode=max` 保存构建层；PR 和版本标签构建不覆盖共享缓存。
+- GHCR 登录在构建前执行，使用仓库的临时 `GITHUB_TOKEN`。正式镜像仍在全部检查通过后发布，发布时直接推送已经测试的镜像。
+- 首次构建或缓存已被删除时会正常执行完整构建；后续构建复用未变化的工具链层。修改靠后的 SSH 配置时，可复用前面的安装层。
+- 每周定时构建使用 `no-cache`，刷新工具链和软件包后更新共享缓存。
+- 手动清理 GHCR 镜像时，可保留 `buildcache-amd64` 标签。清理缓存会使下次构建重新下载和安装依赖；旧的未标记缓存版本可按需清理。
+
+缓存主要减少重复下载和安装的时间，镜像导出、加载、检查及推送仍有开销。性能应以实际缓存命中构建的耗时为准。
 
 ## 参考
 
