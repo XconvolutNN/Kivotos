@@ -1,0 +1,219 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+  schedule:
+    # Every Monday at 01:10 UTC; refresh floating stable/LTS toolchains.
+    - cron: '10 1 * * 1'
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  container:
+    name: Build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      # Follow compatible updates within each major release.
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Image
+        id: image
+        shell: bash
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Tags
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=ref,event=pr
+            type=sha
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+          labels: |
+            org.opencontainers.image.title=Ubuntu Devbox
+            org.opencontainers.image.description=Ubuntu 26.04 developer container with Blender, uv/Python, Go, Rust, Node.js, SSH/SFTP and networking tools
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+
+      - name: Blender
+        id: blender
+        shell: bash
+        run: python3 .github/scripts/resolve-blender-lts.py
+
+      - name: Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          build-args: |
+            BLENDER_VERSION=${{ steps.blender.outputs.version }}
+          pull: true
+          load: true
+          push: false
+          no-cache: ${{ github.event_name == 'schedule' }}
+          cache-from: type=registry,ref=${{ steps.image.outputs.name }}:buildcache-amd64
+          # Only trusted main-branch builds update the shared cache.
+          cache-to: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && format('type=registry,ref={0}:buildcache-amd64,mode=max', steps.image.outputs.name) || '' }}
+          tags: ubuntu-devbox:ci
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Check
+        shell: bash
+        env:
+          EXPECTED_BLENDER_VERSION: ${{ steps.blender.outputs.version }}
+        run: |
+          docker run --rm --env EXPECTED_BLENDER_VERSION --entrypoint /bin/bash ubuntu-devbox:ci -euo pipefail -c '
+            uv --version
+            python --version
+            python3 --version
+            blender --version
+            test "$(blender --version | sed -n "1s/^Blender //p" | cut -d " " -f 1)" = "$EXPECTED_BLENDER_VERSION"
+            go version
+            rustc --version
+            cargo --version
+            node --version
+            npm --version
+            btop --version
+            nvtop --version
+            gh --version
+            tmux -V
+            test -s /etc/apt/sources.list.d/ubuntu.sources
+            if grep -q "http://" /etc/apt/sources.list.d/ubuntu.sources; then exit 1; fi
+            tmux -L ci new-session -d -s smoke
+            test "$(tmux -L ci show-options -gv mouse)" = on
+            tmux -L ci kill-server
+            test -z "$(getcap /usr/bin/nvtop)"
+            test "$(locale charmap 2>&1)" = UTF-8
+            command -v ping traceroute tracert telnet dig nc ip ss gcc g++ make
+
+            test "$(id -u)" = 0
+            test "$(passwd -S root | cut -d " " -f 2)" = L
+            test "$(getent shadow root | cut -d: -f2)" = "!"
+
+            useradd -m -s /bin/bash ciuser
+            su - ciuser -c "uv --version && python --version && blender --version && go version && rustc --version && cargo --version && node --version && npm --version && btop --version && nvtop --version && gh --version && tmux -V"
+            test "$(su - ciuser -c "locale charmap" 2>&1)" = UTF-8
+            su - ciuser -c "test ! -w /opt/rustup && test ! -w /opt/uv/python"
+
+            if su - ciuser -c "su - root -c /usr/bin/true </dev/null" >/dev/null 2>&1; then
+              echo "Unexpected root access through su" >&2
+              exit 1
+            fi
+            printf "%s\n" "ciuser ALL=(root) NOPASSWD: /usr/bin/id" > /etc/sudoers.d/99-ci-root-check
+            chmod 440 /etc/sudoers.d/99-ci-root-check
+            visudo -cf /etc/sudoers.d/99-ci-root-check
+            test "$(su - ciuser -c "sudo -n /usr/bin/id -u")" = 0
+            rm -f /etc/sudoers.d/99-ci-root-check
+
+            mkdir -p /run/sshd
+            ssh-keygen -A
+            cmp /etc/ssh/sshd_config /usr/share/openssh/sshd_config
+            /usr/sbin/sshd -t
+            /usr/sbin/sshd -T > /tmp/sshd-effective
+            grep -Fxq "permitrootlogin no" /tmp/sshd-effective
+            grep -Fxq "pubkeyauthentication yes" /tmp/sshd-effective
+            grep -Fxq "passwordauthentication no" /tmp/sshd-effective
+            grep -Fxq "kbdinteractiveauthentication no" /tmp/sshd-effective
+            grep -Fxq "x11forwarding no" /tmp/sshd-effective
+            grep -Fxq "gatewayports clientspecified" /tmp/sshd-effective
+            grep -Fxq "allowtcpforwarding yes" /tmp/sshd-effective
+            grep -Fxq "allowstreamlocalforwarding yes" /tmp/sshd-effective
+            grep -Fxq "permitopen any" /tmp/sshd-effective
+            grep -Fxq "permitlisten any" /tmp/sshd-effective
+            grep -Fxq "subsystem sftp /usr/lib/openssh/sftp-server" /tmp/sshd-effective
+            test -x /usr/lib/openssh/sftp-server
+          '
+          container_id="$(docker run -d --entrypoint /bin/sleep ubuntu-devbox:ci 60)"
+          trap 'docker rm -f "$container_id" >/dev/null' EXIT
+          test "$(docker exec --user root "$container_id" id -u)" = 0
+
+      - name: Versions
+        shell: bash
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          report="$(mktemp)"
+          trap 'rm -f "$report"' EXIT
+          {
+            printf '### Software versions\n\n'
+            printf 'Commit: `%s`\n\n' "$GITHUB_SHA"
+            printf 'Image ID: `%s`\n\n' "$(docker image inspect ubuntu-devbox:ci --format '{{.Id}}')"
+            printf 'Image tags:\n\n'
+            while IFS= read -r tag; do
+              [[ -n "$tag" ]] || continue
+              printf -- '- `%s`\n' "$tag"
+            done <<< "$IMAGE_TAGS"
+            printf '\n'
+          } > "$report"
+          docker run --rm --entrypoint /bin/bash ubuntu-devbox:ci -euo pipefail -c '
+            row() {
+              local name="$1" version
+              shift
+              version="$("$@" | sed -n "1p")"
+              test -n "$version"
+              version="${version//|/\\|}"
+              printf "| %s | %s |\n" "$name" "$version"
+            }
+            printf "| Software | Version |\n| --- | --- |\n"
+            row Node.js node --version
+            row npm npm --version
+            row npx npx --version
+            row Blender blender --version
+            row Go go version
+            row Rust rustc --version
+            row Cargo cargo --version
+            row rustup rustup --version
+            row rustfmt rustfmt --version
+            row Clippy clippy-driver --version
+            row Python python --version
+            row uv uv --version
+          ' >> "$report"
+          cat "$report" >> "$GITHUB_STEP_SUMMARY"
+
+      # Re-tag/push the exact locally tested image; do not rebuild after tests.
+      - name: Publish
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+        shell: bash
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r tag; do
+            [[ -n "$tag" ]] || continue
+            docker tag ubuntu-devbox:ci "$tag"
+            docker push "$tag"
+          done <<< "$IMAGE_TAGS"
