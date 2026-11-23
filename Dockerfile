@@ -75,17 +75,32 @@ RUN set -euxo pipefail; \
     python3 --version
 
 # Blender LTS: official Linux x64 tarball and SHA256 verification.
+# download.blender.org rate-limits or rejects some cloud ranges (HTTP 403), so the
+# step falls back to the other official mirrors listed on blender.org. Every
+# candidate is verified against the checksum shipped next to it.
 ARG BLENDER_VERSION=5.2.4
 RUN set -euxo pipefail; \
     test "$(dpkg --print-architecture)" = amd64; \
     tmpdir="$(mktemp -d)"; \
     archive="blender-${BLENDER_VERSION}-linux-x64.tar.xz"; \
-    base="https://download.blender.org/release/Blender${BLENDER_VERSION%.*}"; \
-    curl -fsSL --retry 3 "${base}/${archive}" -o "${tmpdir}/${archive}"; \
-    curl -fsSL --retry 3 "${base}/blender-${BLENDER_VERSION}.sha256" -o "${tmpdir}/SHA256"; \
-    checksum="$(awk -v f="${archive}" '$2 == f || $2 == "*" f {print $1}' "${tmpdir}/SHA256")"; \
-    test -n "${checksum}"; \
-    printf '%s  %s\n' "${checksum}" "${tmpdir}/${archive}" | sha256sum -c -; \
+    series="Blender${BLENDER_VERSION%.*}"; \
+    mirrors=( \
+        "https://download.blender.org/release" \
+        "https://ftp.nluug.nl/pub/graphics/blender/release" \
+        "https://mirrors.dotsrc.org/blender/release" \
+        "https://mirror.clarkson.edu/blender/release" \
+    ); \
+    for mirror in "${mirrors[@]}"; do \
+        curl -fsSL --retry 2 --retry-delay 2 "${mirror}/${series}/${archive}" -o "${tmpdir}/${archive}" || continue; \
+        curl -fsSL --retry 2 --retry-delay 2 "${mirror}/${series}/blender-${BLENDER_VERSION}.sha256" -o "${tmpdir}/SHA256" || continue; \
+        checksum="$(awk -v f="${archive}" '$2 == f || $2 == "*" f {print $1}' "${tmpdir}/SHA256")"; \
+        if [ -n "${checksum}" ] && printf '%s  %s\n' "${checksum}" "${tmpdir}/${archive}" | sha256sum -c -; then \
+            echo "blender source: ${mirror}"; \
+            break; \
+        fi; \
+        rm -f "${tmpdir}/${archive}" "${tmpdir}/SHA256"; \
+    done; \
+    test -f "${tmpdir}/${archive}"; \
     tar -xJf "${tmpdir}/${archive}" -C /opt; \
     mv "/opt/blender-${BLENDER_VERSION}-linux-x64" /opt/blender; \
     ln -s /opt/blender/blender /usr/local/bin/blender; \
