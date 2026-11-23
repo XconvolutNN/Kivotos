@@ -51,7 +51,7 @@ RUN set -euxo pipefail; \
     ln -sfn /dev/null /etc/systemd/system/ssh.socket; \
     systemctl enable ssh.service; \
     test -L /etc/systemd/system/multi-user.target.wants/ssh.service; \
-    /usr/sbin/sshd -t -f /etc/ssh/sshd_config
+    test -f /etc/ssh/sshd_config.d/00-kivotos.conf
 
 # Runtime state that Docker keeps outside the image but LXC expects inside it.
 # /etc/hosts, /etc/hostname and /etc/resolv.conf are bind-mounted by the Docker
