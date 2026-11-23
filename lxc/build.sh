@@ -46,9 +46,10 @@ die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 command -v docker >/dev/null || die 'docker is required'
 command -v xz >/dev/null || die 'xz is required'
 docker info >/dev/null 2>&1 || die 'cannot reach the Docker daemon'
+[[ "$(id -u)" == 0 ]] || die 'run as root (the root filesystem must keep uid/gid ownership): sudo lxc/build.sh'
 
 # ---------------------------------------------------------------- version -----
-version=$(git -C "$REPO_DIR" describe --tags --always --dirty 2>/dev/null || true)
+version=$(git -c safe.directory='*' -C "$REPO_DIR" describe --tags --always --dirty 2>/dev/null || true)
 [[ -n "$version" ]] || version=$(date -u +%Y%m%d%H%M%S)
 version=${version#v}
 version=${version//\//-}

@@ -21,7 +21,8 @@ RUN set -euxo pipefail; \
     apt-get install -y --no-install-recommends systemd systemd-sysv; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/*; \
-    /usr/lib/systemd/systemd --version
+    dpkg-query -W -f='systemd ${Version}\n' systemd; \
+    test -x /sbin/init
 
 # OpenSSH as a normal system service, with the same sshd policy the Docker image uses.
 # The vendor unit layouts differ between Ubuntu releases (socket activation on newer

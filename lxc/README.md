@@ -6,10 +6,11 @@
 
 ## 构建
 
-需要一台装有 Docker 的机器（本机有守护进程权限，或 `sudo`）：
+需要一台装有 Docker 的机器，并且以 root 运行（rootfs 必须保留 uid/gid，非 root 解包会丢所有权）：
 
 ```bash
-lxc/build.sh
+sudo lxc/build.sh
+sudo chown -R "$(id -u):$(id -g)" dist
 ```
 
 产物在 `dist/`：
