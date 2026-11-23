@@ -47,3 +47,7 @@ SSH_PORT=2222
 docker build --pull -t kivotos:local .
 KIVOTOS_IMAGE=kivotos:local docker compose up -d --pull never
 ```
+
+## Incus 镜像
+
+`incus/kivotos.yaml` 是 [distrobuilder](https://linuxcontainers.org/distrobuilder/docs/latest/) 镜像定义，内容对应根 `Dockerfile`。构建与使用说明见 [incus/README.md](incus/README.md)。

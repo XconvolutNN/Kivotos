@@ -10,3 +10,5 @@ README.md
 **/node_modules
 **/target
 **/__pycache__
+dist
+incus

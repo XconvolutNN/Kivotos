@@ -75,17 +75,41 @@ RUN set -euxo pipefail; \
     python3 --version
 
 # Blender LTS: official Linux x64 tarball and SHA256 verification.
+# mirror.blender.org is the Blender Foundation's redirector to healthy
+# official mirrors. download.blender.org is Cloudflare-fronted and challenges
+# some cloud build hosts (HTTP 403), so the direct official mirrors follow as
+# static fallbacks. Every candidate is verified against the published checksum.
 ARG BLENDER_VERSION=5.2.4
 RUN set -euxo pipefail; \
     test "$(dpkg --print-architecture)" = amd64; \
     tmpdir="$(mktemp -d)"; \
     archive="blender-${BLENDER_VERSION}-linux-x64.tar.xz"; \
-    base="https://download.blender.org/release/Blender${BLENDER_VERSION%.*}"; \
-    curl -fsSL --retry 3 "${base}/${archive}" -o "${tmpdir}/${archive}"; \
-    curl -fsSL --retry 3 "${base}/blender-${BLENDER_VERSION}.sha256" -o "${tmpdir}/SHA256"; \
-    checksum="$(awk -v f="${archive}" '$2 == f || $2 == "*" f {print $1}' "${tmpdir}/SHA256")"; \
-    test -n "${checksum}"; \
-    printf '%s  %s\n' "${checksum}" "${tmpdir}/${archive}" | sha256sum -c -; \
+    series="Blender${BLENDER_VERSION%.*}"; \
+    mirrors=( \
+        "https://mirror.blender.org/release" \
+        "https://download.blender.org/release" \
+        "https://ftp.nluug.nl/pub/graphics/blender/release" \
+        "https://mirrors.dotsrc.org/blender/release" \
+        "https://mirror.clarkson.edu/blender/release" \
+        "https://ftp.halifax.rwth-aachen.de/blender/release" \
+        "https://mirrors.tuna.tsinghua.edu.cn/blender/release" \
+    ); \
+    for mirror in "${mirrors[@]}"; do \
+        curl -fsSL --retry 3 --retry-delay 5 \
+            --connect-timeout 15 --speed-limit 10240 --speed-time 60 \
+            "${mirror}/${series}/${archive}" -o "${tmpdir}/${archive}" \
+            || { rm -f "${tmpdir}/${archive}"; continue; }; \
+        curl -fsSL --retry 3 --retry-delay 5 \
+            --connect-timeout 15 \
+            "${mirror}/${series}/blender-${BLENDER_VERSION}.sha256" -o "${tmpdir}/SHA256" || continue; \
+        checksum="$(awk -v f="${archive}" '$2 == f || $2 == "*" f {print $1}' "${tmpdir}/SHA256")"; \
+        if [ -n "${checksum}" ] && printf '%s  %s\n' "${checksum}" "${tmpdir}/${archive}" | sha256sum -c -; then \
+            echo "blender source: ${mirror}"; \
+            break; \
+        fi; \
+        rm -f "${tmpdir}/${archive}" "${tmpdir}/SHA256"; \
+    done; \
+    test -f "${tmpdir}/${archive}"; \
     tar -xJf "${tmpdir}/${archive}" -C /opt; \
     mv "/opt/blender-${BLENDER_VERSION}-linux-x64" /opt/blender; \
     ln -s /opt/blender/blender /usr/local/bin/blender; \

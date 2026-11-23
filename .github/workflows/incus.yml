@@ -1,0 +1,188 @@
+name: Incus
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - incus/**
+      - .github/workflows/incus.yml
+  pull_request:
+    paths:
+      - incus/**
+      - .github/workflows/incus.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: incus-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
+
+jobs:
+  image:
+    name: Build
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # The rootfs plus tarballs need a few GB; drop preinstalled toolchains.
+      - name: Disk space
+        shell: bash
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
+          df -h /
+
+      # distrobuilder is the image builder documented by Incus; the Ubuntu
+      # package (3.2 in resolute) understands the same definition format.
+      - name: distrobuilder
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends distrobuilder debootstrap rsync gpg
+          sudo distrobuilder --version
+
+      - name: Validate definition
+        shell: bash
+        run: sudo distrobuilder validate incus/kivotos.yaml
+
+      - name: Build
+        shell: bash
+        run: |
+          mkdir -p dist
+          sudo distrobuilder build-incus --type=unified --compression=xz-6 \
+            incus/kivotos.yaml dist
+          sudo chown -R "$(id -u):$(id -g)" dist
+          ls -lh dist
+
+      # Upload before verification so a failing boot test cannot lose the image.
+      - name: Upload image
+        uses: actions/upload-artifact@v4
+        with:
+          name: kivotos-incus-image
+          path: dist/kivotos.tar.xz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  verify:
+    name: Verify
+    needs: image
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Download image
+        uses: actions/download-artifact@v4
+        with:
+          name: kivotos-incus-image
+          path: dist
+
+      # Incus ships in the Ubuntu archive, but the Zabbly repository is the
+      # installation the Incus project points to and carries current releases.
+      - name: Incus
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo install -d -m 755 /etc/apt/keyrings
+          sudo curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc
+          sudo tee /etc/apt/sources.list.d/zabbly-incus-stable.sources >/dev/null <<EOF
+          Enabled: yes
+          Types: deb
+          URIs: https://pkgs.zabbly.com/incus/stable
+          Suites: ${VERSION_CODENAME}
+          Components: main
+          Architectures: $(dpkg --print-architecture)
+          Signed-By: /etc/apt/keyrings/zabbly.asc
+          EOF
+          sudo apt-get update
+          sudo apt-get install -y incus
+          sudo incus admin init --minimal
+          incus version
+
+      - name: Import and boot
+        shell: bash
+        run: |
+          set -euxo pipefail
+          tar -tJf dist/kivotos.tar.xz | head -20
+          sudo incus image import dist/kivotos.tar.xz --alias kivotos
+          sudo incus launch kivotos smoke
+
+          ready=0
+          for _ in $(seq 1 90); do
+            if sudo incus exec smoke -- true >/dev/null 2>&1; then ready=1; break; fi
+            sleep 2
+          done
+          if [[ "$ready" != 1 ]]; then
+            sudo incus info smoke || true
+            sudo incus info --show-log smoke || true
+            exit 1
+          fi
+
+          sudo incus exec smoke -- systemctl is-system-running --wait || true
+          for _ in $(seq 1 60); do
+            if sudo incus exec smoke -- systemctl is-active --quiet ssh; then break; fi
+            sleep 2
+          done
+          sudo incus exec smoke -- systemctl is-active ssh
+
+          sudo incus exec smoke -- bash -euc '
+            test "$(cat /proc/1/comm)" = systemd
+            uv --version
+            python --version
+            blender --version
+            go version
+            rustc --version
+            cargo --version
+            node --version
+            npm --version
+            tmux -V
+            btop --version
+            gh --version
+            test "$(locale charmap)" = UTF-8
+            test -s /etc/apt/sources.list.d/ubuntu.sources
+            if grep -q "http://" /etc/apt/sources.list.d/ubuntu.sources; then exit 1; fi
+            command -v ping traceroute tracert telnet dig nc ss gcc make
+            test "$(passwd -S root | cut -d" " -f2)" = L
+            /usr/sbin/sshd -T | grep -Fx "permitrootlogin no"
+            /usr/sbin/sshd -T | grep -Fx "allowtcpforwarding yes"
+            /usr/sbin/sshd -T | grep -Fx "gatewayports clientspecified"
+            /usr/sbin/sshd -T | grep -Fx "passwordauthentication no"
+            systemctl is-enabled --quiet ssh
+            test -s /etc/ssh/ssh_host_ed25519_key
+          '
+
+          # End-to-end: create a user, install a key, log in over SSH.
+          sudo incus exec smoke -- bash -euc '
+            useradd -m -s /bin/bash dev
+            install -d -m 700 -o dev -g dev /home/dev/.ssh
+            ssh-keygen -q -t ed25519 -N "" -C ci -f /tmp/ci_key
+            install -m 600 -o dev -g dev /tmp/ci_key.pub /home/dev/.ssh/authorized_keys
+          '
+          sudo incus file pull smoke/tmp/ci_key /tmp/ci_key
+          sudo chmod 600 /tmp/ci_key
+          address=""
+          for _ in $(seq 1 60); do
+            address=$(sudo incus list smoke --format csv -c 4 | cut -d' ' -f1 | head -1)
+            if [[ -n "$address" && "$address" != "-" ]]; then break; fi
+            sleep 2
+          done
+          test -n "$address"
+          echo "container address: ${address}"
+          ssh -i /tmp/ci_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -o BatchMode=yes -o ConnectTimeout=10 "dev@${address}" \
+            'go version && node --version && python --version'
+          if ssh -i /tmp/ci_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -o BatchMode=yes -o ConnectTimeout=10 "root@${address}" true 2>/dev/null; then
+            echo 'root login unexpectedly allowed' >&2
+            exit 1
+          fi
+
+          sudo incus delete -f smoke
+          sudo incus image delete kivotos
