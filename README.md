@@ -47,3 +47,15 @@ SSH_PORT=2222
 docker build --pull -t kivotos:local .
 KIVOTOS_IMAGE=kivotos:local docker compose up -d --pull never
 ```
+
+## LXC / Incus 镜像
+
+根 `Dockerfile` 同样是 LXC 系统容器镜像的唯一来源：`lxc/` 在其上增加 systemd 启动层，`lxc/build.sh` 导出 rootfs 并打包成可导入的镜像。
+
+```bash
+lxc/build.sh
+sudo incus image import dist/kivotos-lxc-*.tar.xz --alias kivotos
+sudo incus launch kivotos devbox
+```
+
+产物是 `dist/kivotos-lxc-<version>-amd64.tar.xz`（Incus / LXD 统一镜像）和 `dist/kivotos-rootfs-<version>-amd64.tar.zst`（Proxmox VE、裸 LXC）。与 Docker 镜像的差异、GPU 和权限说明见 [lxc/README.md](lxc/README.md)。

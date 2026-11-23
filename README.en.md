@@ -47,3 +47,15 @@ SSH_PORT=2222
 docker build --pull -t kivotos:local .
 KIVOTOS_IMAGE=kivotos:local docker compose up -d --pull never
 ```
+
+## LXC / Incus image
+
+The root `Dockerfile` is also the single source for the LXC system-container image: `lxc/` adds the systemd boot layer, and `lxc/build.sh` exports the root filesystem and packages an importable image.
+
+```bash
+lxc/build.sh
+sudo incus image import dist/kivotos-lxc-*.tar.xz --alias kivotos
+sudo incus launch kivotos devbox
+```
+
+The outputs are `dist/kivotos-lxc-<version>-amd64.tar.xz` (unified Incus / LXD image) and `dist/kivotos-rootfs-<version>-amd64.tar.zst` (Proxmox VE, plain LXC). Differences from the Docker image plus GPU and privilege notes are in [lxc/README.md](lxc/README.md).
