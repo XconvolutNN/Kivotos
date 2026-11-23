@@ -6,16 +6,41 @@ from html.parser import HTMLParser
 from pathlib import Path
 import re
 import sys
-from urllib.request import urlopen
+import time
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 
 API = "https://projects.blender.org/api/v1/repos/blender/blender/milestones"
 RELEASES = "https://download.blender.org/release/"
 
+# Used when Blender's hosts rate-limit or block the build host: a known LTS
+# release keeps the image build working instead of failing the workflow.
+FALLBACK_VERSION = "5.2.4"
 
-def fetch(url):
-    with urlopen(url, timeout=30) as response:
-        return response.read().decode("utf-8")
+USER_AGENT = "kivotos-ci/1.0 (+https://github.com/XconvolutNN/Kivotos)"
+
+# What Cloudflare serves instead of the page when it challenges a client.
+CHALLENGE_MARKERS = ("Just a moment", "cf_chl_opt", "challenge-platform")
+
+
+def fetch(url, attempts=3):
+    error = None
+    for attempt in range(attempts):
+        try:
+            request = Request(url, headers={"User-Agent": USER_AGENT})
+            with urlopen(request, timeout=30) as response:
+                text = response.read().decode("utf-8")
+            if any(marker in text for marker in CHALLENGE_MARKERS):
+                raise ValueError(f"Cloudflare challenge page at {url}")
+            return text
+        except (HTTPError, URLError, TimeoutError) as failure:
+            error = failure
+            if attempt + 1 < attempts:
+                time.sleep(5 * (attempt + 1))
+    if error is None:
+        raise RuntimeError(f"Failed to fetch {url}")
+    raise error
 
 
 class Links(HTMLParser):
@@ -74,9 +99,20 @@ def resolve():
     raise ValueError("No published Blender LTS Linux x64 release with SHA256 found")
 
 
-if __name__ == "__main__":
-    version = resolve()
+def main():
+    try:
+        version = resolve()
+    except Exception as failure:  # noqa: BLE001 - any lookup failure uses the pin
+        print(
+            f"warning: {failure}; falling back to Blender {FALLBACK_VERSION}",
+            file=sys.stderr,
+        )
+        version = FALLBACK_VERSION
     print(version)
     if output := os.environ.get("GITHUB_OUTPUT"):
         with Path(output).open("a", encoding="utf-8") as stream:
             stream.write(f"version={version}\n")
+
+
+if __name__ == "__main__":
+    main()

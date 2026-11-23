@@ -75,9 +75,10 @@ RUN set -euxo pipefail; \
     python3 --version
 
 # Blender LTS: official Linux x64 tarball and SHA256 verification.
-# download.blender.org rate-limits or rejects some cloud ranges (HTTP 403), so the
-# step falls back to the other official mirrors listed on blender.org. Every
-# candidate is verified against the checksum shipped next to it.
+# download.blender.org is Cloudflare-fronted and answers some cloud build hosts
+# with HTTP 403 or a rate-limit page, so the step falls back to the official
+# mirrors listed on blender.org. Every candidate is verified against the
+# checksum published next to it.
 ARG BLENDER_VERSION=5.2.4
 RUN set -euxo pipefail; \
     test "$(dpkg --print-architecture)" = amd64; \
@@ -89,10 +90,16 @@ RUN set -euxo pipefail; \
         "https://ftp.nluug.nl/pub/graphics/blender/release" \
         "https://mirrors.dotsrc.org/blender/release" \
         "https://mirror.clarkson.edu/blender/release" \
+        "https://ftp.halifax.rwth-aachen.de/blender/release" \
+        "https://mirrors.tuna.tsinghua.edu.cn/blender/release" \
     ); \
     for mirror in "${mirrors[@]}"; do \
-        curl -fsSL --retry 2 --retry-delay 2 "${mirror}/${series}/${archive}" -o "${tmpdir}/${archive}" || continue; \
-        curl -fsSL --retry 2 --retry-delay 2 "${mirror}/${series}/blender-${BLENDER_VERSION}.sha256" -o "${tmpdir}/SHA256" || continue; \
+        curl -fsSL --retry 3 --retry-all-errors --retry-delay 5 \
+            --connect-timeout 15 --speed-limit 10240 --speed-time 60 \
+            "${mirror}/${series}/${archive}" -o "${tmpdir}/${archive}" || continue; \
+        curl -fsSL --retry 3 --retry-all-errors --retry-delay 5 \
+            --connect-timeout 15 \
+            "${mirror}/${series}/blender-${BLENDER_VERSION}.sha256" -o "${tmpdir}/SHA256" || continue; \
         checksum="$(awk -v f="${archive}" '$2 == f || $2 == "*" f {print $1}' "${tmpdir}/SHA256")"; \
         if [ -n "${checksum}" ] && printf '%s  %s\n' "${checksum}" "${tmpdir}/${archive}" | sha256sum -c -; then \
             echo "blender source: ${mirror}"; \
