@@ -632,3 +632,7 @@ actions:
       test -s /etc/ssh/sshd_config.d/00-kivotos.conf
       test ! -e /etc/ssh/ssh_host_ed25519_key
       command -v uv python blender go rustc cargo node npm gh tmux btop
+
+# x86_64 -> amd64 for debootstrap and the archive paths.
+mappings:
+  architecture_map: debian
