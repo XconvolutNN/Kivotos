@@ -8,6 +8,10 @@ on:
     paths:
       - incus/**
       - .github/workflows/incus.yml
+  pull_request:
+    paths:
+      - incus/**
+      - .github/workflows/incus.yml
 
 permissions:
   contents: read
