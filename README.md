@@ -50,12 +50,4 @@ KIVOTOS_IMAGE=kivotos:local docker compose up -d --pull never
 
 ## Incus 镜像
 
-`incus/kivotos.yaml` 是 [distrobuilder](https://linuxcontainers.org/distrobuilder/docs/latest/) 镜像定义，内容对应根 `Dockerfile`，不依赖 Docker 构建产物：
-
-```bash
-sudo distrobuilder build-incus --type=unified --compression=xz-6 incus/kivotos.yaml dist
-sudo incus image import dist/kivotos.tar.xz --alias kivotos
-sudo incus launch kivotos devbox
-```
-
-说明见 [incus/README.md](incus/README.md)。
+`incus/kivotos.yaml` 是 [distrobuilder](https://linuxcontainers.org/distrobuilder/docs/latest/) 镜像定义，内容对应根 `Dockerfile`。构建与使用说明见 [incus/README.md](incus/README.md)。

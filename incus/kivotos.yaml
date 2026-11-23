@@ -1,25 +1,22 @@
-# Kivotos system-container image, in distrobuilder's image-definition format.
-#
-# Incus builds custom images with distrobuilder:
+# Kivotos system-container image, built with distrobuilder (Incus's image
+# builder). Structure follows the official Ubuntu image definition and the
+# distrobuilder reference; content matches the root Dockerfile.
 #   https://linuxcontainers.org/incus/docs/main/howto/images_create/
-# Format reference:
 #   https://linuxcontainers.org/distrobuilder/docs/latest/reference/
-#
-# The content follows the repository Dockerfile (toolchain set, apt sources,
-# locale, sshd policy and /opt layout). Keep both definitions in sync.
+#   https://github.com/lxc/lxc-ci/blob/main/images/ubuntu.yaml
 
 image:
   distribution: ubuntu
   release: resolute
   architecture: x86_64
-  variant: kivotos
+  variant: default
   name: kivotos
   description: "Kivotos: Ubuntu 26.04 devbox with Blender, uv/Python, Go, Rust, Node.js and OpenSSH"
 
 source:
   downloader: debootstrap
-  # debootstrap on the build host predates 26.04 ("resolute"), so reuse a
-  # release script of the same family the way the official Ubuntu image does.
+  # The build host's debootstrap may predate resolute; reuse a release script
+  # of the same family, as the official Ubuntu definition does.
   same_as: gutsy
   url: http://archive.ubuntu.com/ubuntu/
   keys:
@@ -295,6 +292,144 @@ source:
     =VTg2
     -----END PGP PUBLIC KEY BLOCK-----
 
+targets:
+  lxc:
+    create_message: |-
+      You just created an {{ image.description }} container.
+
+      SSH listens on port 22 and root is locked. Create a user and install
+      an SSH public key from the host before logging in.
+    config:
+    - type: all
+      before: 5
+      content: |-
+        lxc.include = LXC_TEMPLATE_CONFIG/ubuntu.common.conf
+    - type: user
+      before: 5
+      content: |-
+        lxc.include = LXC_TEMPLATE_CONFIG/ubuntu.userns.conf
+    - type: all
+      after: 4
+      content: |-
+        lxc.include = LXC_TEMPLATE_CONFIG/common.conf
+    - type: user
+      after: 4
+      content: |-
+        lxc.include = LXC_TEMPLATE_CONFIG/userns.conf
+    - type: all
+      content: |-
+        lxc.arch = {{ image.architecture_personality }}
+
+files:
+# Incus renders these per instance; plain LXC gets its own values.
+- path: /etc/hostname
+  generator: hostname
+- path: /etc/hosts
+  generator: hosts
+- path: /etc/resolvconf/resolv.conf.d/original
+  generator: remove
+- path: /etc/resolvconf/resolv.conf.d/tail
+  generator: remove
+# systemd generates a machine id on first boot.
+- path: /etc/machine-id
+  generator: dump
+  content: uninitialized
+- path: /var/lib/dbus/machine-id
+  generator: remove
+# DHCP over eth0, applied by systemd-networkd at boot.
+- path: /etc/netplan/10-lxc.yaml
+  generator: dump
+  mode: "0600"
+  content: |-
+    network:
+      version: 2
+      ethernets:
+        eth0:
+          dhcp4: true
+          dhcp-identifier: mac
+# Final apt sources: HTTPS deb822. Packages are bootstrapped over HTTP
+# (debootstrap and the first apt run have no CA certificates yet); this
+# replaces those entries once ca-certificates is installed.
+- path: /etc/apt/sources.list
+  generator: remove
+- path: /etc/apt/sources.list.d/ubuntu.sources
+  generator: dump
+  mode: "0644"
+  pongo: true
+  content: |-
+    Types: deb
+    URIs: https://archive.ubuntu.com/ubuntu/
+    Suites: {{ image.release }} {{ image.release }}-updates
+    Components: main restricted universe multiverse
+    Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+    Types: deb
+    URIs: https://security.ubuntu.com/ubuntu/
+    Suites: {{ image.release }}-security
+    Components: main restricted universe multiverse
+    Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+- path: /etc/tmux.conf
+  generator: dump
+  content: |-
+    set -g mouse on
+# Shared toolchain locations for login shells.
+- path: /etc/profile.d/99-dev-tools.sh
+  generator: dump
+  mode: "0644"
+  content: |-
+    export UV_PYTHON_INSTALL_DIR=/opt/uv/python
+    export UV_PYTHON_BIN_DIR=/usr/local/bin
+    export RUSTUP_HOME=/opt/rustup
+    export RUSTUP_AUTO_INSTALL=0
+# Same sshd policy as the Docker image.
+- path: /etc/ssh/sshd_config.d/00-kivotos.conf
+  generator: dump
+  mode: "0600"
+  content: |-
+    Port 22
+    SyslogFacility AUTHPRIV
+    LogLevel INFO
+    PermitRootLogin no
+    PubkeyAuthentication yes
+    AuthorizedKeysFile .ssh/authorized_keys
+    PasswordAuthentication no
+    PermitEmptyPasswords no
+    KbdInteractiveAuthentication no
+    UsePAM yes
+    DisableForwarding no
+    AllowTcpForwarding yes
+    AllowStreamLocalForwarding yes
+    GatewayPorts clientspecified
+    PermitOpen any
+    PermitListen any
+    X11Forwarding no
+    PermitTTY yes
+    PrintMotd no
+    AcceptEnv LANG LC_*
+# Ubuntu activates ssh.socket; run a standalone ssh.service on Port 22.
+# Host keys are generated at boot (ExecStartPre) and dropped from the image.
+- path: /etc/systemd/system/ssh.service
+  generator: dump
+  mode: "0644"
+  content: |-
+    [Unit]
+    Description=Kivotos OpenSSH server
+    Documentation=man:sshd(8) man:sshd_config(5)
+    After=network.target
+
+    [Service]
+    Type=simple
+    ExecStartPre=/bin/mkdir -p /run/sshd
+    ExecStartPre=-/usr/bin/ssh-keygen -A
+    ExecStart=/usr/sbin/sshd -D -e $SSHD_OPTS
+    ExecReload=/bin/kill -HUP $MAINPID
+    KillMode=process
+    Restart=on-failure
+    RestartSec=1s
+
+    [Install]
+    WantedBy=multi-user.target
+
 packages:
   manager: apt
   update: true
@@ -326,10 +461,6 @@ packages:
         - screen
         - tmux
         - openssh-server
-        - systemd
-        - systemd-sysv
-        - netplan.io
-        - systemd-resolved
         - build-essential
         - pkg-config
         - net-tools
@@ -357,8 +488,16 @@ packages:
         - libxrandr2
         - libxinerama1
         - libxcursor1
-
-  # Full component set; without universe the tool packages below are missing.
+        # System-container base, as in the official Ubuntu image.
+        - systemd
+        - systemd-sysv
+        - netplan.io
+        - systemd-resolved
+        - systemd-timesyncd
+        - fuse3
+  # Build-time sources over HTTP with the full component set; without
+  # universe the tool packages above are missing. Replaced by the HTTPS
+  # deb822 file in the files section.
   repositories:
     - name: sources.list
       url: |-
@@ -368,270 +507,252 @@ packages:
       architectures:
         - amd64
 
-files:
-  # Incus writes these per instance; plain LXC gets its own value.
-  - path: /etc/hostname
-    generator: hostname
-
-  - path: /etc/hosts
-    generator: hosts
-
-  # systemd generates a machine id on first boot.
-  - path: /etc/machine-id
-    generator: dump
-    content: uninitialized
-
-  - path: /var/lib/dbus/machine-id
-    generator: remove
-
-  # DHCP over eth0; systemd-networkd applies it at boot.
-  - path: /etc/netplan/10-lxc.yaml
-    generator: dump
-    mode: "0600"
-    content: |-
-      network:
-        version: 2
-        ethernets:
-          eth0:
-            dhcp4: true
-            dhcp-identifier: mac
-
-  # Same sshd policy as the Docker image.
-  - path: /etc/ssh/sshd_config.d/00-kivotos.conf
-    generator: dump
-    mode: "0600"
-    content: |-
-      Port 22
-      SyslogFacility AUTHPRIV
-      LogLevel INFO
-      PermitRootLogin no
-      PubkeyAuthentication yes
-      AuthorizedKeysFile .ssh/authorized_keys
-      PasswordAuthentication no
-      PermitEmptyPasswords no
-      KbdInteractiveAuthentication no
-      UsePAM yes
-      DisableForwarding no
-      AllowTcpForwarding yes
-      AllowStreamLocalForwarding yes
-      GatewayPorts clientspecified
-      PermitOpen any
-      PermitListen any
-      X11Forwarding no
-      PermitTTY yes
-      PrintMotd no
-      AcceptEnv LANG LC_*
-
-  # Ubuntu activates ssh.socket; the image runs ssh.service on Port 22 instead.
-  - path: /etc/systemd/system/ssh.service
-    generator: dump
-    mode: "0644"
-    content: |-
-      [Unit]
-      Description=Kivotos OpenSSH server
-      Documentation=man:sshd(8) man:sshd_config(5)
-      After=network.target
-
-      [Service]
-      Type=simple
-      ExecStartPre=/bin/mkdir -p /run/sshd
-      ExecStartPre=-/usr/bin/ssh-keygen -A
-      ExecStart=/usr/sbin/sshd -D -e $SSHD_OPTS
-      ExecReload=/bin/kill -HUP $MAINPID
-      KillMode=process
-      Restart=on-failure
-      RestartSec=1s
-
-      [Install]
-      WantedBy=multi-user.target
-
 actions:
-  # Package sources over HTTPS, like the Dockerfile.
-  - trigger: post-packages
-    action: |-
-      #!/bin/sh
-      set -eux
-      for file in /etc/apt/sources.list /etc/apt/sources.list.d/*.sources; do
-        [ -f "${file}" ] || continue
-        sed -i 's|http://|https://|g' "${file}"
-      done
-      apt-get update
-      install -d -m 755 /etc/ssh/sshd_config.d /etc/systemd/system
+# Keep systemd from detecting a running system during package installation
+# (official Ubuntu image pattern).
+- trigger: post-unpack
+  action: |-
+    #!/bin/sh
+    set -eux
+    [ ! -d /run/systemd ] && exit 0
+    rm -Rf /run/systemd/system
+    chattr +i /run/systemd
 
-  # Toolchains installed from their upstream releases, as in the Dockerfile.
-  - trigger: post-packages
-    action: |-
-      #!/bin/bash
-      set -euxo pipefail
-      export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-      export HOME=/root
+- trigger: post-packages
+  action: |-
+    #!/bin/sh
+    set -eux
+    [ ! -d /run/systemd ] && exit 0
+    chattr -i /run/systemd
 
-      printf '%s\n' 'set -g mouse on' > /etc/tmux.conf
-      printf '%s\n' 'set tabsize 4' >> /etc/nanorc
-      printf '%s\n' 'en_US.UTF-8 UTF-8' > /etc/locale.gen
-      locale-gen
-      update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
-      ln -sfn "$(command -v traceroute)" /usr/local/bin/tracert
-      if [ -n "$(getcap /usr/bin/nvtop || true)" ]; then
-        setcap -r /usr/bin/nvtop
+- trigger: post-packages
+  action: |-
+    #!/bin/sh
+    set -eux
+    systemctl enable systemd-networkd
+    systemctl mask ua-auto-attach
+
+- trigger: post-packages
+  action: |-
+    #!/bin/sh
+    set -eux
+    echo 'en_US.UTF-8 UTF-8' > /etc/locale.gen
+    locale-gen
+    update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+    rm -f /etc/localtime
+    ln -s /usr/share/zoneinfo/UTC /etc/localtime
+    echo UTC > /etc/timezone
+
+# Configuration that appends to package-provided files.
+- trigger: post-packages
+  action: |-
+    #!/bin/sh
+    set -eux
+    printf '%s\n' 'set tabsize 4' >> /etc/nanorc
+    printf '%s\n' \
+      'UV_PYTHON_INSTALL_DIR=/opt/uv/python' \
+      'UV_PYTHON_BIN_DIR=/usr/local/bin' \
+      'RUSTUP_HOME=/opt/rustup' \
+      'RUSTUP_AUTO_INSTALL=0' >> /etc/environment
+    ln -sfn "$(command -v traceroute)" /usr/local/bin/tracert
+    if [ -n "$(getcap /usr/bin/nvtop || true)" ]; then
+      setcap -r /usr/bin/nvtop
+    fi
+
+# uv, then the newest stable CPython it supports, shared read-only.
+- trigger: post-packages
+  action: |-
+    #!/bin/bash
+    set -euxo pipefail
+    export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    export HOME=/root
+    export UV_PYTHON_INSTALL_DIR=/opt/uv/python
+    export UV_PYTHON_BIN_DIR=/usr/local/bin
+    curl -fsSL --retry 3 https://astral.sh/uv/install.sh -o /tmp/uv-install.sh
+    UV_UNMANAGED_INSTALL=/usr/local/bin sh /tmp/uv-install.sh
+    rm -f /tmp/uv-install.sh
+    uv python install --default
+    chmod -R a+rX /opt/uv/python
+    uv --version
+    python --version
+
+# Blender LTS tarball, checksum-verified. mirror.blender.org is the Blender
+# Foundation's redirector to healthy official mirrors; download.blender.org
+# is Cloudflare-fronted and challenges some cloud build hosts, so the direct
+# official mirrors follow as static fallbacks.
+- trigger: post-packages
+  action: |-
+    #!/bin/bash
+    set -euxo pipefail
+    export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    blender_version=5.2.4  # keep in sync with the Dockerfile ARG
+    tmpdir="$(mktemp -d)"
+    archive="blender-${blender_version}-linux-x64.tar.xz"
+    series="Blender${blender_version%.*}"
+    for mirror in \
+      https://mirror.blender.org/release \
+      https://download.blender.org/release \
+      https://ftp.nluug.nl/pub/graphics/blender/release \
+      https://mirrors.dotsrc.org/blender/release \
+      https://mirror.clarkson.edu/blender/release \
+      https://ftp.halifax.rwth-aachen.de/blender/release \
+      https://mirrors.tuna.tsinghua.edu.cn/blender/release; do
+      curl -fsSL --retry 3 --retry-delay 5 \
+        --connect-timeout 15 --speed-limit 10240 --speed-time 60 \
+        "${mirror}/${series}/${archive}" -o "${tmpdir}/${archive}" ||
+        { rm -f "${tmpdir}/${archive}"; continue; }
+      curl -fsSL --retry 3 --retry-delay 5 --connect-timeout 15 \
+        "${mirror}/${series}/blender-${blender_version}.sha256" \
+        -o "${tmpdir}/SHA256" || continue
+      checksum="$(awk -v f="${archive}" '$2 == f || $2 == "*" f {print $1}' "${tmpdir}/SHA256")"
+      if [ -n "${checksum}" ] &&
+        printf '%s  %s\n' "${checksum}" "${tmpdir}/${archive}" | sha256sum -c -; then
+        echo "blender source: ${mirror}"
+        break
       fi
+      rm -f "${tmpdir}/${archive}" "${tmpdir}/SHA256"
+    done
+    test -f "${tmpdir}/${archive}"
+    tar -xJf "${tmpdir}/${archive}" -C /opt
+    mv "/opt/blender-${blender_version}-linux-x64" /opt/blender
+    ln -sfn /opt/blender/blender /usr/local/bin/blender
+    rm -rf "${tmpdir}"
+    blender --version
 
-      printf '%s\n' \
-        'export UV_PYTHON_INSTALL_DIR=/opt/uv/python' \
-        'export UV_PYTHON_BIN_DIR=/usr/local/bin' \
-        'export RUSTUP_HOME=/opt/rustup' \
-        'export RUSTUP_AUTO_INSTALL=0' \
-        > /etc/profile.d/99-dev-tools.sh
-      printf '%s\n' \
-        'UV_PYTHON_INSTALL_DIR=/opt/uv/python' \
-        'UV_PYTHON_BIN_DIR=/usr/local/bin' \
-        'RUSTUP_HOME=/opt/rustup' \
-        'RUSTUP_AUTO_INSTALL=0' \
-        >> /etc/environment
+# Go: newest stable release, checksum from the official JSON index.
+- trigger: post-packages
+  action: |-
+    #!/bin/bash
+    set -euxo pipefail
+    export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    info="$(curl -fsSL --retry 3 'https://go.dev/dl/?mode=json' |
+      jq -r '[.[] | select(.stable == true)][0].files[] |
+        select(.os == "linux" and .arch == "amd64" and .kind == "archive") |
+        [.filename, .sha256] | @tsv')"
+    read -r filename checksum <<< "${info}"
+    test -n "${filename}"
+    test -n "${checksum}"
+    tmpdir="$(mktemp -d)"
+    curl -fsSL --retry 3 "https://go.dev/dl/${filename}" -o "${tmpdir}/${filename}"
+    printf '%s  %s\n' "${checksum}" "${tmpdir}/${filename}" | sha256sum -c -
+    tar -xzf "${tmpdir}/${filename}" -C /usr/local
+    ln -sfn /usr/local/go/bin/go /usr/local/bin/go
+    ln -sfn /usr/local/go/bin/gofmt /usr/local/bin/gofmt
+    rm -rf "${tmpdir}"
+    go version
 
-      export UV_PYTHON_INSTALL_DIR=/opt/uv/python
-      export UV_PYTHON_BIN_DIR=/usr/local/bin
-      export RUSTUP_HOME=/opt/rustup
+# Rust: latest stable toolchain, shared read-only.
+- trigger: post-packages
+  action: |-
+    #!/bin/bash
+    set -euxo pipefail
+    export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    export HOME=/root
+    mkdir -p /opt/rustup /opt/rust-cargo
+    curl --proto '=https' --tlsv1.2 -fsSL --retry 3 \
+      https://sh.rustup.rs -o /tmp/rustup.sh
+    CARGO_HOME=/opt/rust-cargo RUSTUP_HOME=/opt/rustup \
+      sh /tmp/rustup.sh -y --no-modify-path \
+      --profile default --default-toolchain stable
+    for tool in rustup rustc cargo rustdoc rustfmt cargo-fmt cargo-clippy clippy-driver; do
+      if [ -x "/opt/rust-cargo/bin/${tool}" ]; then
+        ln -sfn "/opt/rust-cargo/bin/${tool}" "/usr/local/bin/${tool}"
+      fi
+    done
+    chmod -R a+rX /opt/rustup /opt/rust-cargo
+    rm -f /tmp/rustup.sh
+    rustc --version
+    cargo --version
 
-      # uv, then the newest stable CPython it supports.
-      curl -fsSL --retry 3 https://astral.sh/uv/install.sh -o /tmp/uv-install.sh
-      UV_UNMANAGED_INSTALL=/usr/local/bin sh /tmp/uv-install.sh
-      rm -f /tmp/uv-install.sh
-      uv python install --default
-      chmod -R a+rX /opt/uv/python
+# Node.js: newest LTS from the official release index.
+- trigger: post-packages
+  action: |-
+    #!/bin/bash
+    set -euxo pipefail
+    export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    version="$(curl -fsSL --retry 3 https://nodejs.org/dist/index.json |
+      jq -r '[.[] | select((.lts | type) == "string") |
+        select(.files | index("linux-x64"))] | .[0].version // empty')"
+    test -n "${version}"
+    archive="node-${version}-linux-x64.tar.xz"
+    base="https://nodejs.org/dist/${version}"
+    tmpdir="$(mktemp -d)"
+    curl -fsSL --retry 3 "${base}/${archive}" -o "${tmpdir}/${archive}"
+    curl -fsSL --retry 3 "${base}/SHASUMS256.txt" -o "${tmpdir}/SHASUMS256.txt"
+    checksum="$(awk -v f="${archive}" '$2 == f {print $1; found=1} END {if (!found) exit 1}' \
+      "${tmpdir}/SHASUMS256.txt")"
+    printf '%s  %s\n' "${checksum}" "${tmpdir}/${archive}" | sha256sum -c -
+    mkdir -p /opt/node
+    tar -xJf "${tmpdir}/${archive}" -C /opt/node --strip-components=1
+    for tool in node npm npx; do
+      ln -sfn "/opt/node/bin/${tool}" "/usr/local/bin/${tool}"
+    done
+    rm -rf "${tmpdir}"
+    node --version
+    npm --version
 
-      # Blender LTS tarball, checksum-verified, with mirror fallback: the
-      # origin is behind Cloudflare and rejects some cloud build hosts.
-      blender_version=5.2.4  # keep in sync with the Dockerfile ARG
-      tmpdir="$(mktemp -d)"
-      archive="blender-${blender_version}-linux-x64.tar.xz"
-      series="Blender${blender_version%.*}"
-      for mirror in \
-        https://download.blender.org/release \
-        https://ftp.nluug.nl/pub/graphics/blender/release \
-        https://mirrors.dotsrc.org/blender/release \
-        https://mirror.clarkson.edu/blender/release \
-        https://ftp.halifax.rwth-aachen.de/blender/release \
-        https://mirrors.tuna.tsinghua.edu.cn/blender/release; do
-        curl -fsSL --retry 3 --retry-all-errors --retry-delay 5 \
-          --connect-timeout 15 --speed-limit 10240 --speed-time 60 \
-          "${mirror}/${series}/${archive}" -o "${tmpdir}/${archive}" || continue
-        curl -fsSL --retry 3 --retry-all-errors --retry-delay 5 \
-          --connect-timeout 15 \
-          "${mirror}/${series}/blender-${blender_version}.sha256" \
-          -o "${tmpdir}/SHA256" || continue
-        checksum="$(awk -v f="${archive}" '$2 == f || $2 == "*" f {print $1}' "${tmpdir}/SHA256")"
-        if [ -n "${checksum}" ] &&
-          printf '%s  %s\n' "${checksum}" "${tmpdir}/${archive}" | sha256sum -c -; then
-          echo "blender source: ${mirror}"
-          break
-        fi
-        rm -f "${tmpdir}/${archive}" "${tmpdir}/SHA256"
-      done
-      test -f "${tmpdir}/${archive}"
-      tar -xJf "${tmpdir}/${archive}" -C /opt
-      mv "/opt/blender-${blender_version}-linux-x64" /opt/blender
-      ln -sfn /opt/blender/blender /usr/local/bin/blender
-      rm -rf "${tmpdir}"
+# Clean build-host leftovers from the target's /run and shadow backups.
+- trigger: post-packages
+  action: |-
+    #!/bin/sh
+    set -eux
+    mount -o bind / /mnt
+    rm -rf /mnt/run/*
+    umount /mnt
+    rm -f /etc/*-
 
-      # Go: newest stable release, checksum from the official JSON index.
-      info="$(curl -fsSL --retry 3 'https://go.dev/dl/?mode=json' |
-        jq -r '[.[] | select(.stable == true)][0].files[] |
-          select(.os == "linux" and .arch == "amd64" and .kind == "archive") |
-          [.filename, .sha256] | @tsv')"
-      read -r filename checksum <<< "${info}"
-      test -n "${filename}"
-      test -n "${checksum}"
-      tmpdir="$(mktemp -d)"
-      curl -fsSL --retry 3 "https://go.dev/dl/${filename}" -o "${tmpdir}/${filename}"
-      printf '%s  %s\n' "${checksum}" "${tmpdir}/${filename}" | sha256sum -c -
-      tar -xzf "${tmpdir}/${filename}" -C /usr/local
-      ln -sfn /usr/local/go/bin/go /usr/local/bin/go
-      ln -sfn /usr/local/go/bin/gofmt /usr/local/bin/gofmt
-      rm -rf "${tmpdir}"
+# SSH wiring and root lockdown.
+- trigger: post-files
+  action: |-
+    #!/bin/bash
+    set -euxo pipefail
+    export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    ln -sfn /dev/null /etc/systemd/system/ssh.socket
+    systemctl enable ssh.service
+    test -L /etc/systemd/system/multi-user.target.wants/ssh.service
 
-      # Rust: latest stable toolchain, shared read-only.
-      mkdir -p /opt/rustup /opt/rust-cargo
-      curl --proto '=https' --tlsv1.2 -fsSL --retry 3 \
-        https://sh.rustup.rs -o /tmp/rustup.sh
-      CARGO_HOME=/opt/rust-cargo RUSTUP_HOME=/opt/rustup \
-        sh /tmp/rustup.sh -y --no-modify-path \
-        --profile default --default-toolchain stable
-      for tool in rustup rustc cargo rustdoc rustfmt cargo-fmt cargo-clippy clippy-driver; do
-        if [ -x "/opt/rust-cargo/bin/${tool}" ]; then
-          ln -sfn "/opt/rust-cargo/bin/${tool}" "/usr/local/bin/${tool}"
-        fi
-      done
-      chmod -R a+rX /opt/rustup /opt/rust-cargo
-      rm -f /tmp/rustup.sh
+    # Validate the effective sshd config, then drop the generated host keys
+    # so every instance regenerates its own on first boot.
+    mkdir -p /run/sshd
+    ssh-keygen -A
+    /usr/sbin/sshd -t
+    /usr/sbin/sshd -T | grep -Fx 'permitrootlogin no'
+    /usr/sbin/sshd -T | grep -Fx 'passwordauthentication no'
+    /usr/sbin/sshd -T | grep -Fx 'gatewayports clientspecified'
+    /usr/sbin/sshd -T | grep -Fx 'allowtcpforwarding yes'
+    rm -f /etc/ssh/ssh_host_*
 
-      # Node.js: newest LTS from the official release index.
-      version="$(curl -fsSL --retry 3 https://nodejs.org/dist/index.json |
-        jq -r '[.[] | select((.lts | type) == "string") |
-          select(.files | index("linux-x64"))] | .[0].version // empty')"
-      test -n "${version}"
-      archive="node-${version}-linux-x64.tar.xz"
-      base="https://nodejs.org/dist/${version}"
-      tmpdir="$(mktemp -d)"
-      curl -fsSL --retry 3 "${base}/${archive}" -o "${tmpdir}/${archive}"
-      curl -fsSL --retry 3 "${base}/SHASUMS256.txt" -o "${tmpdir}/SHASUMS256.txt"
-      checksum="$(awk -v f="${archive}" '$2 == f {print $1; found=1} END {if (!found) exit 1}' \
-        "${tmpdir}/SHASUMS256.txt")"
-      printf '%s  %s\n' "${checksum}" "${tmpdir}/${archive}" | sha256sum -c -
-      mkdir -p /opt/node
-      tar -xJf "${tmpdir}/${archive}" -C /opt/node --strip-components=1
-      for tool in node npm npx; do
-        ln -sfn "/opt/node/bin/${tool}" "/usr/local/bin/${tool}"
-      done
-      rm -rf "${tmpdir}"
+    passwd -l root
+    case "$(getent shadow root | cut -d: -f2)" in
+      \!*) ;;
+      *) echo 'root password is not locked' >&2; exit 1 ;;
+    esac
 
-      blender --version
-      go version
-      rustc --version
-      node --version
-      python --version
+# HTTPS sources are in place now; refresh the indexes to prove they work,
+# then remove build leftovers.
+- trigger: post-files
+  action: |-
+    #!/bin/bash
+    set -euxo pipefail
+    export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    apt-get update
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb /root/.bash_history
+    install -d -m 755 /var/lib/apt/lists/partial /var/cache/apt/archives/partial
+    chmod 1777 /tmp /var/tmp
+    test -s /etc/ssh/sshd_config.d/00-kivotos.conf
+    test ! -e /etc/ssh/ssh_host_ed25519_key
+    command -v uv python blender go rustc cargo node npm gh tmux btop
 
-  # Service wiring, first-boot setup and build leftovers.
-  - trigger: post-files
-    action: |-
-      #!/bin/bash
-      set -euxo pipefail
-      export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-
-      ln -sfn /dev/null /etc/systemd/system/ssh.socket
-      systemctl enable ssh.service
-      test -L /etc/systemd/system/multi-user.target.wants/ssh.service
-
-      systemctl enable systemd-networkd
-      # DNS comes from systemd-resolved; the file present here belongs to the
-      # build host, not to the image.
-      umount -l /etc/resolv.conf 2>/dev/null || true
-      rm -f /etc/resolv.conf
-      ln -sfn ../run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
-
-      # Validate the effective sshd config, then drop the generated host keys.
-      mkdir -p /run/sshd
-      ssh-keygen -A
-      /usr/sbin/sshd -t
-      /usr/sbin/sshd -T | grep -Fx 'permitrootlogin no'
-      /usr/sbin/sshd -T | grep -Fx 'gatewayports clientspecified'
-      /usr/sbin/sshd -T | grep -Fx 'allowtcpforwarding yes'
-      rm -f /etc/ssh/ssh_host_*
-
-      # Root stays locked; log in through a normal user.
-      passwd -l root
-      case "$(getent shadow root | cut -d: -f2)" in
-        \!*) ;;
-        *) echo 'root password is not locked' >&2; exit 1 ;;
-      esac
-
-      rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb /root/.bash_history
-      install -d -m 755 /var/lib/apt/lists/partial /var/cache/apt/archives/partial
-      chmod 1777 /tmp /var/tmp
-
-      test -s /etc/ssh/sshd_config.d/00-kivotos.conf
-      test ! -e /etc/ssh/ssh_host_ed25519_key
-      command -v uv python blender go rustc cargo node npm gh tmux btop
+# Last step: DNS must keep working for every action above (the build host's
+# resolv.conf stays bind-mounted until now). Hand DNS to systemd-resolved
+# for the running instance.
+- trigger: post-files
+  action: |-
+    #!/bin/sh
+    set -eux
+    umount -l /etc/resolv.conf || true
+    rm -f /etc/resolv.conf
+    ln -sf ../run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
 
 # x86_64 -> amd64 for debootstrap and the archive paths.
 mappings:

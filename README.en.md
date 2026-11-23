@@ -50,12 +50,4 @@ KIVOTOS_IMAGE=kivotos:local docker compose up -d --pull never
 
 ## Incus image
 
-`incus/kivotos.yaml` is a [distrobuilder](https://linuxcontainers.org/distrobuilder/docs/latest/) image definition that follows the root `Dockerfile`, without consuming the Docker image:
-
-```bash
-sudo distrobuilder build-incus --type=unified --compression=xz-6 incus/kivotos.yaml dist
-sudo incus image import dist/kivotos.tar.xz --alias kivotos
-sudo incus launch kivotos devbox
-```
-
-See [incus/README.md](incus/README.md).
+`incus/kivotos.yaml` is a [distrobuilder](https://linuxcontainers.org/distrobuilder/docs/latest/) image definition that follows the root `Dockerfile`. See [incus/README.md](incus/README.md) for build and usage instructions.

@@ -40,7 +40,7 @@ jobs:
           df -h /
 
       # distrobuilder is the image builder documented by Incus; the Ubuntu
-      # package (3.0) understands the same definition format.
+      # package (3.2 in resolute) understands the same definition format.
       - name: distrobuilder
         shell: bash
         run: |
@@ -146,6 +146,8 @@ jobs:
             btop --version
             gh --version
             test "$(locale charmap)" = UTF-8
+            test -s /etc/apt/sources.list.d/ubuntu.sources
+            if grep -q "http://" /etc/apt/sources.list.d/ubuntu.sources; then exit 1; fi
             command -v ping traceroute tracert telnet dig nc ss gcc make
             test "$(passwd -S root | cut -d" " -f2)" = L
             /usr/sbin/sshd -T | grep -Fx "permitrootlogin no"
