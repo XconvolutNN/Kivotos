@@ -46,6 +46,44 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" dist
           df -h /
 
+      # Upload before verification so a failing smoke test cannot lose the artifact.
+      - name: Upload image
+        uses: actions/upload-artifact@v4
+        with:
+          name: kivotos-lxc-image
+          path: dist/kivotos-lxc-*.tar.xz*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Upload rootfs
+        uses: actions/upload-artifact@v4
+        with:
+          name: kivotos-lxc-rootfs
+          path: dist/kivotos-rootfs-*.tar.zst
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 30
+
+  verify:
+    name: Verify
+    needs: image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Download image
+        uses: actions/download-artifact@v4
+        with:
+          name: kivotos-lxc-image
+          path: dist
+
+      - name: Download rootfs
+        uses: actions/download-artifact@v4
+        with:
+          name: kivotos-lxc-rootfs
+          path: dist
+
       - name: Inspect
         shell: bash
         run: |
@@ -54,25 +92,40 @@ jobs:
           rootfs=$(ls dist/kivotos-rootfs-*.tar.zst)
           echo "archive: $archive ($(du -h "$archive" | cut -f1))"
           echo "rootfs:  $rootfs ($(du -h "$rootfs" | cut -f1))"
+          # Read both listings in full: piping into "grep -q" closes the pipe early
+          # and makes tar die with "stdout: write error" under pipefail.
           listing=$(tar -tJf "$archive")
-          grep -qx 'metadata.yaml' <<< "$listing"
-          # /sbin is a symlink to usr/sbin on Ubuntu, so assert the real paths.
-          grep -qx 'rootfs/usr/lib/systemd/systemd' <<< "$listing"
-          grep -qx 'rootfs/usr/sbin/sshd' <<< "$listing"
-          grep -qx 'rootfs/etc/systemd/system/multi-user.target.wants/ssh.service' <<< "$listing"
-          grep -qx 'rootfs/etc/ssh/sshd_config.d/00-kivotos.conf' <<< "$listing"
+          verbose=$(tar -tvJf "$archive")
+          rootfs_listing=$(zstd -dc "$rootfs" | tar -t)
+          for path in \
+            metadata.yaml \
+            rootfs/usr/lib/systemd/systemd \
+            rootfs/usr/sbin/sshd \
+            rootfs/etc/ssh/sshd_config.d/00-kivotos.conf \
+            rootfs/etc/systemd/system/ssh.service \
+            rootfs/etc/systemd/system/multi-user.target.wants/ssh.service \
+            rootfs/etc/machine-id \
+            rootfs/usr/local/bin/blender \
+            rootfs/usr/local/bin/go \
+            rootfs/usr/local/bin/node; do
+            grep -qx "$path" <<< "$listing" || { echo "missing $path" >&2; exit 1; }
+          done
           if grep -qx 'rootfs/.dockerenv' <<< "$listing"; then
             echo '.dockerenv is still in the image' >&2
             exit 1
           fi
-          # LXC/Incus build /dev themselves; shipping device nodes breaks the import.
-          if tar -tvJf "$archive" |
-              awk '{ t = substr($1, 1, 1); if (t == "b" || t == "c" || t == "p") print }' |
-              grep -q 'rootfs/'; then
-            echo 'device nodes found in rootfs' >&2
+          if grep -qE '^rootfs/etc/ssh/ssh_host_' <<< "$listing"; then
+            echo 'SSH host keys are baked into the image' >&2
             exit 1
           fi
-          zstd -dc "$rootfs" | tar -t | grep -qx './usr/lib/systemd/systemd'
+          # LXC/Incus create /dev themselves; shipped device nodes break the import.
+          devices=$(awk 'substr($1, 1, 1) ~ /^[bcp]$/ { print $NF }' <<< "$verbose" | grep '^rootfs/' || true)
+          if [[ -n "$devices" ]]; then
+            echo 'device nodes found in rootfs:' >&2
+            echo "$devices" >&2
+            exit 1
+          fi
+          grep -qx './usr/lib/systemd/systemd' <<< "$rootfs_listing"
           cat dist/*.sha256
 
       - name: Boot test (Incus)
@@ -150,21 +203,3 @@ jobs:
           '
           sudo incus delete -f smoke
           sudo incus image delete kivotos
-
-      - name: Upload image
-        uses: actions/upload-artifact@v4
-        with:
-          name: kivotos-lxc-image
-          path: dist/kivotos-lxc-*.tar.xz*
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 30
-
-      - name: Upload rootfs
-        uses: actions/upload-artifact@v4
-        with:
-          name: kivotos-lxc-rootfs
-          path: dist/kivotos-rootfs-*.tar.zst
-          if-no-files-found: warn
-          compression-level: 0
-          retention-days: 30
