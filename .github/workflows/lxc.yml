@@ -56,10 +56,23 @@ jobs:
           echo "rootfs:  $rootfs ($(du -h "$rootfs" | cut -f1))"
           listing=$(tar -tJf "$archive")
           grep -qx 'metadata.yaml' <<< "$listing"
-          grep -qx 'rootfs/sbin/init' <<< "$listing"
+          # /sbin is a symlink to usr/sbin on Ubuntu, so assert the real paths.
+          grep -qx 'rootfs/usr/lib/systemd/systemd' <<< "$listing"
+          grep -qx 'rootfs/usr/sbin/sshd' <<< "$listing"
           grep -qx 'rootfs/etc/systemd/system/multi-user.target.wants/ssh.service' <<< "$listing"
-          test -z "$(grep -E '^rootfs/(\.dockerenv|dev/[a-z])' <<< "$listing" || true)"
-          zstd -dc "$rootfs" | tar -t | grep -qx './sbin/init'
+          grep -qx 'rootfs/etc/ssh/sshd_config.d/00-kivotos.conf' <<< "$listing"
+          if grep -qx 'rootfs/.dockerenv' <<< "$listing"; then
+            echo '.dockerenv is still in the image' >&2
+            exit 1
+          fi
+          # LXC/Incus build /dev themselves; shipping device nodes breaks the import.
+          if tar -tvJf "$archive" |
+              awk '{ t = substr($1, 1, 1); if (t == "b" || t == "c" || t == "p") print }' |
+              grep -q 'rootfs/'; then
+            echo 'device nodes found in rootfs' >&2
+            exit 1
+          fi
+          zstd -dc "$rootfs" | tar -t | grep -qx './usr/lib/systemd/systemd'
           cat dist/*.sha256
 
       - name: Boot test (Incus)
