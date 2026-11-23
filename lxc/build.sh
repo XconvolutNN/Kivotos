@@ -152,7 +152,10 @@ for path in \
     opt/blender/blender \
     etc/profile.d/99-dev-tools.sh \
     etc/environment; do
-    [[ -e "$rootfs/$path" ]] || die "missing /$path in root filesystem"
+    # Absolute symlinks inside the image (e.g. /sbin/init, /usr/local/bin/blender)
+    # dangle when resolved against the build host, so accept them as present.
+    [[ -e "$rootfs/$path" || -L "$rootfs/$path" ]] \
+        || die "missing /$path in root filesystem"
 done
 [[ -L "$rootfs/etc/systemd/system/ssh.socket" ]] || die 'ssh.socket is not masked'
 [[ "$(readlink "$rootfs/etc/systemd/system/ssh.socket")" == /dev/null ]] \
