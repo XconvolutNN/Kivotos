@@ -38,18 +38,11 @@ jobs:
           docker image prune -af || true
           df -h /
 
-      - name: Blender LTS
-        id: blender
-        shell: bash
-        run: python3 .github/scripts/resolve-blender-lts.py
-
       - name: Build
         shell: bash
-        env:
-          BLENDER_VERSION: ${{ steps.blender.outputs.version }}
         run: |
           command -v zstd >/dev/null || sudo apt-get install -y zstd
-          sudo env BLENDER_VERSION="$BLENDER_VERSION" lxc/build.sh
+          sudo lxc/build.sh
           sudo chown -R "$(id -u):$(id -g)" dist
           df -h /
 
